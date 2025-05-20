@@ -7,10 +7,16 @@ from bs4 import BeautifulSoup
 import re
 import time
 from datetime import datetime
+from datetime import date
+import json
+from pathlib import Path
 import matplotlib.pyplot as plt
 
 nr = input('wie zou je willen opzoeken?: plak het bondsnummer hier: ')
+# nr = '26473402'
 inp = int(input('\nsingles or doubles? press 1 for singles, 2 for doubles: '))
+# inp = 1
+max_years = int(input('\nHow many years ago do you want to look back (max=8): '))
 
 webdriver_path = "chromedriver-mac-arm64/chromedriver"
 
@@ -121,9 +127,42 @@ def otherYears():
     list_items = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'ul.page-nav--pills li')))
 
     non_active_list_items = [li for li in list_items if "page-nav__item--active" not in li.get_attribute("class")]
+    non_active_list_items = non_active_list_items[:3]
 
     return non_active_list_items[:2]
 
+def toggle():
+    more_li = wait.until(EC.presence_of_element_located((
+        By.CSS_SELECTOR,
+        "ul.page-nav--pills li.page-nav__item--more:not(.is-hidden)"
+    )))
+
+    # 2️⃣ Click its toggle <span>
+    toggle = more_li.find_element(By.CSS_SELECTOR, "span.js-toggle-dropdown")
+    toggle.click()
+
+def MoreYears():
+    more_li = wait.until(EC.presence_of_element_located((
+        By.CSS_SELECTOR,
+        "ul.page-nav--pills li.page-nav__item--more:not(.is-hidden)"
+    )))
+    print("DEBUG: Found the visible <li>:", more_li.get_attribute("outerHTML")[:100], "…")
+
+    # 2️⃣ Click its toggle <span>
+    toggle = more_li.find_element(By.CSS_SELECTOR, "span.js-toggle-dropdown")
+    toggle.click()
+    print("DEBUG: Clicked the toggle span")
+
+    #  (optionally wait a tiny bit for any animation)
+    time.sleep(0.2)
+
+    # 3️⃣ Now, from that same <li>, find its dropdown-items
+    dropdown_items = more_li.find_elements(
+        By.CSS_SELECTOR,
+        "ul.page-nav--more li.js-page-nav__item.page-nav__item"
+    )
+
+    return dropdown_items[:5]
 
 def Quit():
     driver.quit()
@@ -137,39 +176,159 @@ def switchTab(year):
 
     time.sleep(2)
 
+def currentRating(soup, inp):
+    ratings = soup.find_all("span", class_="tag-duo__value")
+    if inp == 1:
+        rating = ratings[0].text
+    else:
+        rating = ratings[1].text
+    return rating
 
-def plotGraph(data, player_name):
-    dates = [datetime.strptime(entry["date"], "%d-%m-%Y") for entry in data]
-    ratings = [float(entry["rating"].replace(",", ".")) for entry in data]
-    plt.figure(figsize=(10, 6))
-    plt.plot(dates, ratings, marker='o', linestyle='-', color='b')
-    plt.xlabel("Date")
-    plt.ylabel("Rating")
-    plt.title(f"Player Rating Over Time for {player_name}")
-    plt.grid(True)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.show()
+
+def generate_rating_plot_html(dates, ratings, player_name, output_path="rating_plot.html"):
+    """
+    dates     : list of ISO-strings, e.g. ["2022-05-10", "2022-05-17", …]
+    ratings   : list of floats,      e.g. [6.01, 6.05, …]
+    player_name: string
+    output_path: filename to write
+    """
+    iso_dates = [
+        datetime.strptime(entry["date"], "%d-%m-%Y").strftime("%Y-%m-%d")
+        for entry in data
+    ]
+    ratings_js = json.dumps(
+        [float(entry["rating"].replace(",", ".")) for entry in data]
+    )
+    dates_js = json.dumps(iso_dates)
+    player_js = json.dumps(player_name)
+
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Player Rating Over Time</title>
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <style>
+    body {{ font-family: Arial, sans-serif; background: #f4f4f9; margin:0; }}
+    .container {{
+      max-width:960px; margin:40px auto;
+      background:#fff; border-radius:8px;
+      box-shadow:0 2px 8px rgba(0,0,0,0.1);
+      padding:20px;
+    }}
+    h1 {{ text-align:center; color:#333; margin-bottom:0.5em; }}
+    #chart {{ width:100%; height:500px; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Player Rating Over Time for <span id="playerName"></span></h1>
+    <div id="chart"></div>
+  </div>
+  <script>
+    const dates   = {dates_js};
+    const ratings = {ratings_js};
+    const playerName = {player_js};
+
+    document.getElementById('playerName').textContent = playerName;
+    
+    const yMin = Math.min(...ratings) - 0.2;
+    const yMax = Math.max(...ratings) + 0.2;
+
+
+    const trace = {{
+      x: dates,
+      y: ratings,
+      mode: 'lines+markers',
+      type: 'scatter',
+      marker: {{ size: 8, color: '#0074D9' }},
+      line: {{ shape: 'spline', smoothing: 0.5, color: '#0074D9' }},
+      hovertemplate: '%{{x}}<br>Rating: %{{y}}<extra></extra>'
+    }};
+    
+    const bestValue = Math.min(...ratings);
+    const bestIndex = ratings.indexOf(bestValue);
+    const bestDate  = dates[bestIndex];
+    const traceBest = {{
+      x: [bestDate],
+      y: [bestValue],
+      mode: 'markers+text',
+      type: 'scatter',
+      marker: {{ size: 12, color: '#FF4136' }},
+      text: ['Best'],
+      textposition: 'top center',
+      hovertemplate: 'Best: %{{y}} on %{{x}}<extra></extra>'
+    }};
+
+    const layout = {{
+      margin:{{l:60,r:40,t:60,b:60}},
+      xaxis:{{ title:'Date', type:'date', tickformat:'%Y-%m-%d', tickangle:-45 }},
+      yaxis:{{ title:'Rating', range:[yMin, yMax] }},
+      plot_bgcolor:'#fafafa',
+      paper_bgcolor:'#ffffff',
+      hovermode:'closest'
+    }};
+
+    Plotly.newPlot('chart', [trace, traceBest], layout, {{responsive: true}});
+  </script>
+</body>
+</html>"""
+
+    Path(output_path).write_text(html, encoding="utf-8")
+    print(f"Wrote interactive chart to {output_path}")
+
 
 
 def main(name):
     handleCookies()
+    time.sleep(10)
     playerLookup(name)
     MoreDetails(inp)
     soup = getPageContent()
     media_snippet = soup.find('div', class_='media')
     player_name = media_snippet.find('span', class_='nav-link__value').text
     print(f'Data verzamelen voor {player_name}... \n')
+    current_rating = currentRating(soup, inp)
+    data.append({'date': date.today().strftime("%d-%m-%Y"), 'rating': current_rating})
+
     best_rating = scrapeYear(soup, player_name)
     other_years = otherYears()
+    years = 1
+
     for year in other_years:
+        if years > max_years:
+            break
         switchTab(year)
         MoreDetails(inp)
         soup = getPageContent()
         best_rating = scrapeYear(soup, player_name)
+        years+= 1
+
+    extra_years = MoreYears()
+    toggle()
+    for year in extra_years:
+        if years > max_years:
+            break
+        toggle()
+        switchTab(year)
+        MoreDetails(inp)
+        soup = getPageContent()
+        best_rating = scrapeYear(soup, player_name)
+        years+=1
 
     print(f"Best Rating: {best_rating['rating']} on Date: {best_rating['date']}")
-    plotGraph(data, player_name)
+    dates = [entry["date"] for entry in data]
+    ratings = [float(entry["rating"].replace(",", ".")) for entry in data]
+
+    # 2. Call our HTML generator
+    generate_rating_plot_html(
+        dates,
+        ratings,
+        player_name=player_name,  # or whatever your variable is
+        output_path=f"{player_name}.html"
+    )
 
     Quit()
 
